@@ -10,8 +10,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let source = rodio::Decoder::new(BufReader::new(file))?;
     println!("Read file");
-    
+
+    let source = rodio::source::Spatial::new(
+        source,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0]
+    );
+
     let sample_rate = source.sample_rate();
+
     let waveform: Vec<i16> = source.into_iter().collect();
     println!("Converted file into waveform");
     
