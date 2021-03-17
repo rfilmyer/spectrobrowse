@@ -8,4 +8,8 @@ edition = "2018"
 
 [dependencies]
 rodio = "0.13.0"
-sonogram = "0.4.3"
+plotters = "0.3.0"
+rustfft = "5.0.1"
+ndarray = "0.14.0"
+ndarray-stats = "0.4.0"
+colorous = "1.0.3"
