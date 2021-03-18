@@ -6,10 +6,11 @@ use ndarray_stats::QuantileExt;
 use plotters::{coord::Shift, prelude::*};
 use rodio::{self, Decoder, source::Spatial};
 use rustfft::{FftPlanner, num_complex::Complex};
-use std::{error::Error};
 use colorous;
 
-pub fn load_soundfile_from_path<P: AsRef<Path>>(path: P) -> Result<Vec<i16>, Box<dyn Error>> {
+use eyre::Result;
+
+pub fn load_soundfile_from_path<P: AsRef<Path>>(path: P) -> Result<Vec<i16>, eyre::Report> {
     let file = File::open(path)?;
 
     let source = Decoder::new(BufReader::new(file))?;
@@ -25,7 +26,7 @@ pub fn load_soundfile_from_path<P: AsRef<Path>>(path: P) -> Result<Vec<i16>, Box
 
 }
 
-pub fn compute_spectrogram(waveform: Vec<i16>, window_size: usize, overlap: f64) -> Result<Array2<f32>, Box<dyn Error>> {
+pub fn compute_spectrogram(waveform: Vec<i16>, window_size: usize, overlap: f64) -> Result<Array2<f32>, eyre::Report> {
     let skip_size = (window_size as f64 * (1f64 - overlap)) as usize;
 
     let waveform = Array::from(waveform);
@@ -45,8 +46,13 @@ pub fn compute_spectrogram(waveform: Vec<i16>, window_size: usize, overlap: f64)
     let fft = planner.plan_fft_forward(window_size);
 
     // Since we have a 2-D array of our windows with shape [window_size, (num_samples / window_size) - 1], we can run an FFT on every row.
+    let mut scratch_buffer = vec![Complex::new(0f32, 0f32); window_size];
     windows.axis_iter_mut(Axis(0))
-        .for_each(|mut frame| { fft.process(frame.as_slice_mut().unwrap()); });
+        .for_each(|mut frame| { 
+            if let Some(buffer) = frame.as_slice_mut() {
+                fft.process_with_scratch(buffer, scratch_buffer.as_mut_slice()); 
+            };
+        });
     
     // Get the real component of those complex numbers we get back from the FFT
     let windows = windows.map(|i| i.re);
@@ -69,8 +75,7 @@ pub fn plot_spectrogram<DB: DrawingBackend>(spectrogram: &Array2<f32>, drawing_a
         _ => panic!("Spectrogram is a {}D array, expected a 2D array.
                      This should never happen (should not be possible to call function with anything but a 2d array)", spectrogram.ndim())
     };
-
-    println!("Generating a {} wide x {} high image", num_samples, num_freq_bins);
+    println!("...from a spectrogram with {} samples x {} frequency bins.", num_samples, num_freq_bins);
 
     let spectrogram_cells = drawing_area.split_evenly((num_freq_bins, num_samples));
 
