@@ -1,11 +1,11 @@
-use std::path::Path;
+use std::{fmt::{Debug}, iter::Sum, path::Path};
 use std::io::BufReader;
 use std::fs::File;
-use ndarray::{Array, Array2, Axis};
+use ndarray::{Array, Array2, ArrayView1, Axis};
 use ndarray_stats::QuantileExt;
 use plotters::{coord::Shift, prelude::*};
 use rodio::{self, Decoder, source::Spatial};
-use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{FftPlanner, num_complex::Complex, num_traits::{FromPrimitive, Num}};
 use colorous;
 
 use eyre::Result;
@@ -60,8 +60,44 @@ pub fn compute_spectrogram(waveform: Vec<i16>, window_size: usize, overlap: f64)
     // And finally, only look at the first half of the spectrogram - the first (n/2)+1 points of each FFT
     // https://dsp.stackexchange.com/questions/4825/why-is-the-fft-mirrored
     let windows = windows.slice_move(ndarray::s![.., ..((window_size / 2) + 1)]);
+    let windows_shape = windows.shape();
 
-    Ok(windows)
+    let log_transformed = windows.axis_iter(Axis(0))
+        .map(log_distort_vector)
+        .flatten()
+        .collect::<Vec<_>>();
+    
+    let log_transformed = Array::from_shape_vec(windows_shape, log_transformed)?;
+    let log_transformed = log_transformed.into_dimensionality()?;
+    Ok(log_transformed)
+}
+
+fn log_distort_vector<'a, T: Num + Sum<&'a T> + FromPrimitive + Copy + Debug>(input: ArrayView1<'a, T>) -> Vec<T> {
+    let length = input.len();
+    let log_length = f32::log2(length as f32);
+    let log_bin_width = log_length / length as f32;
+
+    let log_transformed = (1..(length + 1))
+        .map(|i| {
+            let lower = log_bin_width * (i as f32 - 1f32);
+            let lower = lower
+                .exp2()
+                .floor() as usize;
+            let higher = log_bin_width * (i as f32);
+            let higher = higher
+                .exp2()
+                .floor() as usize;
+
+            // eprintln!("slicing between {} (= {:?}) and {} (= {:?}) on an array {} long", lower, input.get(lower), higher, input.get(higher), length);
+            let average_spectral_density = input.slice(ndarray::s![lower..higher])
+                .mean()
+                .unwrap_or_else(|| {*input.get(lower).expect(format!("index {} out of bounds for array with length {}", lower, length).as_str())})
+                ;
+            average_spectral_density
+        })
+        .collect::<Vec<_>>();
+
+    log_transformed
 }
 
 pub fn plot_spectrogram<DB: DrawingBackend>(spectrogram: &Array2<f32>, drawing_area: &DrawingArea<DB, Shift>) {
@@ -76,8 +112,6 @@ pub fn plot_spectrogram<DB: DrawingBackend>(spectrogram: &Array2<f32>, drawing_a
                      This should never happen (should not be possible to call function with anything but a 2d array)", spectrogram.ndim())
     };
     println!("...from a spectrogram with {} samples x {} frequency bins.", num_samples, num_freq_bins);
-
-    let spectrogram_cells = drawing_area.split_evenly((num_freq_bins, num_samples));
 
     // Scaling values
     let windows_scaled = spectrogram.map(|i| i.abs()/(num_freq_bins as f32));
@@ -115,13 +149,19 @@ pub fn plot_spectrogram<DB: DrawingBackend>(spectrogram: &Array2<f32>, drawing_a
     */
     let windows_flipped = windows_scaled.slice(ndarray::s![.., ..; -1]); // flips the
     let windows_flipped = windows_flipped.t();
+    let windows_scaled = windows_flipped.map(|x| { x.sqrt() / highest_spectral_density.sqrt() });
+
+    eprintln!("Splitting drawing area...");
+
+    let spectrogram_cells = drawing_area.split_evenly((num_freq_bins, num_samples));
 
     // Finally add a color scale
     let color_scale = colorous::MAGMA;
 
-    for (cell, spectral_density) in spectrogram_cells.iter().zip(windows_flipped.iter()) {
-            let spectral_density_scaled = spectral_density.sqrt() / highest_spectral_density.sqrt();
-            let color = color_scale.eval_continuous(spectral_density_scaled as f64);
+    eprintln!("Drawing Cells");
+
+    for (cell, &spectral_density) in spectrogram_cells.iter().zip(windows_scaled.iter()) {
+            let color = color_scale.eval_continuous(spectral_density as f64);
             cell.fill(&RGBColor(color.r, color.g, color.b)).unwrap();
         };
 }
