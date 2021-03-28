@@ -8,7 +8,7 @@ Browse through audio clips by viewing their spectrograms
 * Graphs are truncated instead of downscaled
 
 # Current Todos
-* Generate FFTs in log scale instead of linear scale
+* ~Generate FFTs in log scale instead of linear scale~
 * CLI Ergonomics - command line args (`clap`) and progress bars and feedback (`indicatif`)
 
 # Project Goals
