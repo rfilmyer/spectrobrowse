@@ -1,20 +1,32 @@
 use colorous;
 use eyre::Result;
 use image::{self, DynamicImage, GrayImage, RgbImage};
-use ndarray::{Array, Array2, ArrayView1, Axis};
+use ndarray::{Array, Array2, ArrayViewMut1, Axis};
 use ndarray_stats::QuantileExt;
 use rodio::{self, source::Spatial, Decoder};
 use rustfft::{
     num_complex::Complex,
-    num_traits::{FromPrimitive, Num},
+    num_traits::{Float, FromPrimitive},
     FftPlanner,
 };
 use std::fs::File;
 use std::io::BufReader;
-use std::{fmt::Debug, iter::Sum, path::Path};
+use std::{fmt::Debug, path::Path};
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AudioFileDecodingError {
+    #[error("Could not load audio file.")]
+    Read(#[from] std::io::Error),
+    #[error("Could not decode audio file.")]
+    Decoding(#[from] rodio::decoder::DecoderError),
+}
 
 /// Loads an audio file as a waveform and mixes down to mono if necessary.
-pub fn load_soundfile_from_path<P: AsRef<Path>>(path: P) -> Result<Vec<i16>, eyre::Report> {
+pub fn load_soundfile_from_path<P: AsRef<Path>>(
+    path: P,
+) -> Result<Vec<i16>, AudioFileDecodingError> {
     let file = File::open(path)?;
 
     let source = Decoder::new(BufReader::new(file))?;
@@ -24,13 +36,19 @@ pub fn load_soundfile_from_path<P: AsRef<Path>>(path: P) -> Result<Vec<i16>, eyr
     Ok(spatial_filter.into_iter().collect())
 }
 
+#[derive(Error, Debug)]
+pub enum ComputeSpectrogramError {
+    #[error("Could not prepare the waveform for FFT. This is a bug and should never happen.")]
+    DataReshapeError(#[from] ndarray::ShapeError),
+}
+
 /// Computes a spectrogram from a waveform and "log-transforms" the spectrogram frequencies, if desired
 pub fn compute_spectrogram(
     waveform: Vec<i16>,
     window_size: usize,
     overlap: f64,
     log_transform: bool,
-) -> Result<Array2<f32>, eyre::Report> {
+) -> Result<Array2<f32>, ComputeSpectrogramError> {
     let skip_size = (window_size as f64 * (1f64 - overlap)) as usize;
 
     let waveform = Array::from(waveform);
@@ -64,56 +82,46 @@ pub fn compute_spectrogram(
     let windows = windows.slice_move(ndarray::s![.., ..((window_size / 2) + 1)]);
 
     if log_transform {
-        let windows_shape = windows.shape();
-        let log_transformed = windows
-            .axis_iter(Axis(0))
-            .map(log_distort_vector)
-            .flatten()
-            .collect::<Vec<_>>();
-
-        let log_transformed = Array::from_shape_vec(windows_shape, log_transformed)?;
-        let log_transformed = log_transformed.into_dimensionality()?;
-        Ok(log_transformed)
+        let mut windows = windows;
+        windows.axis_iter_mut(Axis(0)).for_each(log_distort_vector);
+        Ok(windows)
     } else {
         Ok(windows)
     }
 }
 
-/// The log-distortion function, effectively changing the frequency windows from linear to log scale.
-/// The API for this currently is not great - it returns a new `Vec<T>` that must be then reassembled into an array.
-/// Actual testing shows that this is not close to being the constraint, though, so I'm not going to try to make it better.
-fn log_distort_vector<'a, T: Num + Sum<&'a T> + FromPrimitive + Copy + Debug>(
-    input: ArrayView1<'a, T>,
-) -> Vec<T> {
-    let length = input.len();
+/// The log-distortion function, effectively changing the frequency windows from linear to log scale.  
+fn log_distort_vector<'a, T: Float + FromPrimitive>(mut array: ArrayViewMut1<'a, T>) {
+    let orig_array = array.to_owned();
+    let length = orig_array.len();
     let log_length = f32::log2(length as f32);
     let log_bin_width = log_length / length as f32;
 
-    let log_transformed = (1..(length + 1))
-        .map(|i| {
-            let lower = log_bin_width * (i as f32 - 1f32);
-            let lower = lower.exp2().floor() as usize;
-            let higher = log_bin_width * (i as f32);
-            let higher = higher.exp2().floor() as usize;
+    // eprintln!("Array length {}", length);
 
-            // eprintln!("slicing between {} (= {:?}) and {} (= {:?}) on an array {} long", lower, input.get(lower), higher, input.get(higher), length);
-            let average_spectral_density = input
-                .slice(ndarray::s![lower..higher])
-                .mean()
-                .unwrap_or_else(|| {
-                    *input.get(lower).expect(
-                        format!(
-                            "index {} out of bounds for array with length {}",
-                            lower, length
-                        )
-                        .as_str(),
-                    )
-                });
-            average_spectral_density
-        })
-        .collect::<Vec<_>>();
+    for i in 0..(length) {
+        let lower = log_bin_width * (i as f32 - 1f32);
+        let lower = lower.exp2().floor() as usize;
+        let higher = log_bin_width * (i as f32);
+        let higher = higher.exp2().floor() as usize;
 
-    log_transformed
+        // eprintln!("Index {}: Indexing between {} and {}, length {}", i, lower, higher, higher - lower);
+
+        let average_spectral_density = if higher == lower {
+            orig_array.get(higher).map(|x| *x)
+        } else {
+            orig_array.slice(ndarray::s![lower..higher]).mean()
+        };
+
+        let average_spectral_density = average_spectral_density.unwrap_or_else(|| {
+            panic!("Array is empty = 0 frequency bins in FFT???");
+        }); // replace this
+
+        let item = array.get_mut(i).unwrap_or_else(|| {
+            panic!("Went out of bounds in array");
+        });
+        *item = average_spectral_density;
+    }
 }
 
 /// Renders a spectrogram as an RGB image, resizing into a `width` x `height` image.
@@ -126,10 +134,10 @@ pub fn render_spectrogram(spectrogram: &Array2<f32>, width: u32, height: u32) ->
         _ => panic!("Spectrogram is a {}D array, expected a 2D array.
                      This should never happen (should not be possible to call function with anything but a 2d array)", spectrogram.ndim())
     };
-    println!(
+    /*println!(
         "...from a spectrogram with {} samples x {} frequency bins.",
         num_samples, num_freq_bins
-    );
+    ); */
 
     // Scaling values
     let windows_scaled = spectrogram.map(|i| i.abs() / (num_freq_bins as f32));
@@ -165,12 +173,12 @@ pub fn render_spectrogram(spectrogram: &Array2<f32>, width: u32, height: u32) ->
 
         ... in order to look like a proper spectrogram
     */
-    println!("Vector transformation operations...");
+    // println!("Vector transformation operations...");
     let windows_flipped = windows_scaled.slice(ndarray::s![.., ..; -1]); // flips the
     let windows_flipped = windows_flipped.t();
     let windows_scaled = windows_flipped.map(|x| x.sqrt() / highest_spectral_density.sqrt()); // values are now between 0 and 1
 
-    println!("Resizing spectrogram...");
+    // println!("Resizing spectrogram...");
     let image_buffer = GrayImage::from_raw(
         num_samples as u32,
         num_freq_bins as u32,
@@ -193,7 +201,7 @@ pub fn render_spectrogram(spectrogram: &Array2<f32>, width: u32, height: u32) ->
 
     let mut image_buffer = DynamicImage::ImageLuma8(image_buffer).to_rgb8();
 
-    eprintln!("Drawing image...");
+    // eprintln!("Drawing image...");
     image_buffer.pixels_mut().for_each(|x| {
         *x = image::Rgb(
             color_scale
