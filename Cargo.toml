@@ -1,6 +1,6 @@
 [package]
 name = "spectrobrowse"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Roger Filmyer <spectrobrowse@synolect.com>"]
 edition = "2018"
 

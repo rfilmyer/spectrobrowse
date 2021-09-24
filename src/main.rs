@@ -158,9 +158,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // load waveforms
     let waveforms = input_filepaths
-        .into_iter() // Doesn't need to be parallel
+        .into_iter() // Needs to move, doesn't need to be parallel, so `into_iter()`.
         .progress_with(progress_bar_decoding_files.clone())
         .map(move |filepath| {
+            
             // Decode the audio files
             let file_stem = filepath
                 .file_name()
@@ -205,7 +206,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Multiprocessing begins here:
     // FFT calculation
     let spectrograms = waveforms
-        .par_iter()
+        .par_iter()// Doesn't need to move, needs to be parallel, so `par_iter()`.
         .progress_with(fft_progress_bar.clone())
         .filter_map(move |a| {
             let audio_file_stem = a.file_stem.clone();
@@ -245,7 +246,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .progress_chars("##-"));
 
     let images = spectrograms
-        .into_par_iter()
+        .into_par_iter()// Needs to move, needs to be parallel, so `into_par_iter()`.
         .progress_with(graphing_progress_bar.clone())
         .map(|s| {
             // determine output filename
@@ -282,7 +283,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .progress_chars("##-"));
 
         images
-            .into_iter()
+            .iter()// Doesn't to move, doesn't need to be parallel (IO bound), so `iter()`.
             .progress_with(saving_progress_bar.clone())
             .for_each(|(output_file_path, image_buffer)| {
                 image_buffer
