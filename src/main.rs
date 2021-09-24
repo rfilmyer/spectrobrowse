@@ -12,7 +12,7 @@ use ndarray::Array2;
 use rayon::{iter::IntoParallelRefIterator, prelude::*};
 
 use clap::{App, Arg};
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressIterator};
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressIterator, ProgressStyle};
 
 struct DecodedAudioFile {
     filepath: PathBuf,
@@ -21,7 +21,6 @@ struct DecodedAudioFile {
 }
 
 struct Spectrogram {
-    audio_filepath: PathBuf,
     audio_file_stem: OsString,
     spectrogram: Array2<f32>,
 }
@@ -146,10 +145,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         })
         .map(|de| de.path());
+    
+    // read_dir doesn't tell us how many files we have (which means no fancy progress bar), 
+    //   so let's collect into a Vec before we continue.
+    let input_filepaths = input_filepaths.collect::<Vec<_>>();
+
+    let progress_bar_decoding_files = ProgressBar::new(input_filepaths.len() as u64)
+        .with_message("Loading and Decoding Audio Files...")
+        .with_style(ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+            .progress_chars("##-"));
 
     // load waveforms
     let waveforms = input_filepaths
-        .progress()
+        .into_iter() // Doesn't need to be parallel
+        .progress_with(progress_bar_decoding_files.clone())
         .map(move |filepath| {
             // Decode the audio files
             let file_stem = filepath
@@ -183,15 +193,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .filter_map(|x| x)
         .collect::<Vec<DecodedAudioFile>>(); // I would *love* to not have to collect here but I'll deal with that later
+    progress_bar_decoding_files.finish();
 
-    let num_files = waveforms.len() as u64;
-    let fft_progress_bar = ProgressBar::new(num_files);
-    let graphing_progress_bar = ProgressBar::new(num_files);
+    let fft_progress_bar = ProgressBar::new( waveforms.len() as u64)
+        .with_message("Computing Spectrograms...")
+        .with_style(ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+            .progress_chars("##-"));
+    
+    
     // Multiprocessing begins here:
     // FFT calculation
     let spectrograms = waveforms
         .par_iter()
-        .progress_with(fft_progress_bar)
+        .progress_with(fft_progress_bar.clone())
         .filter_map(move |a| {
             let audio_file_stem = a.file_stem.clone();
             let audio_filepath = a.filepath.clone();
@@ -205,7 +220,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             match computed_spectrogram {
                 Ok(spectrogram) => Some(Spectrogram {
                     audio_file_stem,
-                    audio_filepath,
                     spectrogram,
                 }),
                 Err(e) => {
@@ -217,11 +231,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     None
                 }
             }
-        });
+        })
+        .collect::<Vec<_>>();
 
+    fft_progress_bar.finish();
+    
     // Graphing
-    spectrograms
-        .progress_with(graphing_progress_bar)
+    
+    let graphing_progress_bar = ProgressBar::new(spectrograms.len() as u64)
+    .with_message("Rendering Spectrogram Images...")
+    .with_style(ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+        .progress_chars("##-"));
+
+    let images = spectrograms
+        .into_par_iter()
+        .progress_with(graphing_progress_bar.clone())
         .map(|s| {
             // determine output filename
             let output_file_path =
@@ -246,18 +271,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (output_file_path, image_buffer)
             },
         )
-        .progress()
-        .for_each(|(output_file_path, image_buffer)| {
-            image_buffer
-                .save(&output_file_path)
-                .unwrap_or_else(|error| {
-                    eprintln!(
-                        "Error saving {}: {}",
-                        output_file_path.to_string_lossy(),
-                        error
-                    )
-                });
-        });
+        .collect::<Vec<_>>();
+
+        graphing_progress_bar.finish();
+
+        let saving_progress_bar = ProgressBar::new(images.len() as u64)
+        .with_message("Saving Spectrogram Images...")
+        .with_style(ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+            .progress_chars("##-"));
+
+        images
+            .into_iter()
+            .progress_with(saving_progress_bar.clone())
+            .for_each(|(output_file_path, image_buffer)| {
+                image_buffer
+                    .save(&output_file_path)
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "Error saving {}: {}",
+                            output_file_path.to_string_lossy(),
+                            error
+                        )
+                    });
+            });
+        
+        saving_progress_bar.finish();
 
     Ok(())
 }

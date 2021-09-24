@@ -1,20 +1,20 @@
 [package]
 name = "spectrobrowse"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Roger Filmyer <spectrobrowse@synolect.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rodio = "0.13.0"
-colorous = "1.0.3"
+rodio = "0.14.0"
+colorous = "1.0.5"
 rustfft = "5.0.1"
-ndarray = "0.14.0"
-ndarray-stats = "0.4.0"
+ndarray = "0.15.3"
+ndarray-stats = "0.5.0"
 rayon = "1.5.0"
 eyre = "0.6.5"
 thiserror = "1.0.24"
 clap = "2.33.0"
 image = "0.23.14"
-indicatif = {version = "0.15.0", features = ["rayon"]}
+indicatif = {version = "0.16.2", features = ["rayon"]}
